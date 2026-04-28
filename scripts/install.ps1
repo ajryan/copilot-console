@@ -156,9 +156,9 @@ try {
 }
 
 Write-Host ""
-Write-Host "  ┌───────────────────────────────────────────────────┐" -ForegroundColor Yellow
-Write-Host "  │   This may take 5-8 minutes — please wait...      │" -ForegroundColor Yellow
-Write-Host "  └───────────────────────────────────────────────────┘" -ForegroundColor Yellow
+Write-Host "  ┌─────────────────────────────────────────────────────┐" -ForegroundColor Yellow
+Write-Host "  │  ⏳ This may take 5-8 minutes — please wait...      │" -ForegroundColor Yellow
+Write-Host "  └─────────────────────────────────────────────────────┘" -ForegroundColor Yellow
 Write-Host ""
 
 $installed = $false
