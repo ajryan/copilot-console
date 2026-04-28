@@ -192,6 +192,30 @@ echo -e "${CYAN}  Copilot Console Installer${NC}"
 echo -e "${GRAY}  ====================================${NC}"
 echo ""
 
+# --- Check curl ---
+if ! have curl; then
+    echo -e "${RED}  [ERROR] curl not found.${NC}"
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        if have brew; then
+            boxed -h "What to do" \
+                "1. Install curl:  brew install curl" \
+                "2. Re-run this installer."
+        else
+            boxed -h "What to do" \
+                "1. curl ships with macOS by default; reinstall the Command Line Tools:" \
+                "     xcode-select --install" \
+                "2. Re-run this installer."
+        fi
+    else
+        boxed -h "What to do" \
+            "1. Install curl:" \
+            "     sudo apt install curl   # Debian/Ubuntu" \
+            "     sudo dnf install curl   # Fedora/RHEL" \
+            "2. Re-run this installer."
+    fi
+    die
+fi
+
 # --- Check Python ---
 if ! have python3; then
     echo -e "${RED}  [ERROR] Python 3 not found.${NC}"
