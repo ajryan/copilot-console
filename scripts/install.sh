@@ -124,7 +124,7 @@ echo -e "${GREEN}  [OK] Found $TAG_NAME${NC}"
 
 echo ""
 echo -e "${YELLOW}  ┌─────────────────────────────────────────────────────┐${NC}"
-echo -e "${YELLOW}  │  ⏳ This may take 5-8 minutes — please wait...     │${NC}"
+echo -e "${YELLOW}  │  ⏳ This may take 5-8 minutes — please wait...      │${NC}"
 echo -e "${YELLOW}  └─────────────────────────────────────────────────────┘${NC}"
 echo ""
 
