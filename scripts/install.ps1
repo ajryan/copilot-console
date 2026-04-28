@@ -48,11 +48,11 @@ if (-not $python) {
 if (-not $python) {
     Write-Host "  [ERROR] Python not found." -ForegroundColor Red
     Write-Host ""
-    Write-Host "  ┌─ What to do: ─────────────────────────────────────────────────────────────┐" -ForegroundColor Yellow
-    Write-Host "  │  1. Install Python 3.11+ from https://www.python.org/downloads/           │" -ForegroundColor Yellow
-    Write-Host "  │  2. Re-run:                                                                │" -ForegroundColor Yellow
-    Write-Host "  │     irm https://raw.githubusercontent.com/$REPO/main/scripts/install.ps1 | iex" -ForegroundColor Yellow
-    Write-Host "  └────────────────────────────────────────────────────────────────────────────┘" -ForegroundColor Yellow
+    Write-Host "  ┌─ What to do: ───────────────────────────────────────────────────────────────────┐" -ForegroundColor Yellow
+    Write-Host "  │  1. Install Python 3.11+ from https://www.python.org/downloads/                 │" -ForegroundColor Yellow
+    Write-Host "  │  2. Re-run:                                                                     │" -ForegroundColor Yellow
+    Write-Host "  │     irm https://raw.githubusercontent.com/$REPO/main/scripts/install.ps1 | iex  |" -ForegroundColor Yellow
+    Write-Host "  └─────────────────────────────────────────────────────────────────────────────────┘" -ForegroundColor Yellow
     exit 1
 }
 $pyVer = (python --version 2>&1) -replace 'Python\s*', ''
@@ -60,11 +60,11 @@ $pyMajor, $pyMinor = $pyVer.Split('.')[0..1] | ForEach-Object { [int]$_ }
 if ($pyMajor -lt 3 -or ($pyMajor -eq 3 -and $pyMinor -lt 11)) {
     Write-Host "  [ERROR] Python 3.11+ required (found $pyVer)" -ForegroundColor Red
     Write-Host ""
-    Write-Host "  ┌─ What to do: ─────────────────────────────────────────────────────────────┐" -ForegroundColor Yellow
-    Write-Host "  │  1. Install Python 3.11+ from https://www.python.org/downloads/           │" -ForegroundColor Yellow
-    Write-Host "  │  2. Re-run:                                                                │" -ForegroundColor Yellow
-    Write-Host "  │     irm https://raw.githubusercontent.com/$REPO/main/scripts/install.ps1 | iex" -ForegroundColor Yellow
-    Write-Host "  └────────────────────────────────────────────────────────────────────────────┘" -ForegroundColor Yellow
+    Write-Host "  ┌─ What to do: ───────────────────────────────────────────────────────────────────┐" -ForegroundColor Yellow
+    Write-Host "  │  1. Install Python 3.11+ from https://www.python.org/downloads/                 │" -ForegroundColor Yellow
+    Write-Host "  │  2. Re-run:                                                                     │" -ForegroundColor Yellow
+    Write-Host "  │     irm https://raw.githubusercontent.com/$REPO/main/scripts/install.ps1 | iex  |" -ForegroundColor Yellow
+    Write-Host "  └─────────────────────────────────────────────────────────────────────────────────┘" -ForegroundColor Yellow
     exit 1
 }
 Write-Host "  [OK] Python $pyVer" -ForegroundColor Green
@@ -88,11 +88,11 @@ if (-not $node) {
 if (-not $node) {
     Write-Host "  [ERROR] Node.js not found." -ForegroundColor Red
     Write-Host ""
-    Write-Host "  ┌─ What to do: ─────────────────────────────────────────────────────────────┐" -ForegroundColor Yellow
-    Write-Host "  │  1. Install Node.js 18+ from https://nodejs.org/ (LTS recommended)        │" -ForegroundColor Yellow
-    Write-Host "  │  2. Re-run:                                                                │" -ForegroundColor Yellow
-    Write-Host "  │     irm https://raw.githubusercontent.com/$REPO/main/scripts/install.ps1 | iex" -ForegroundColor Yellow
-    Write-Host "  └────────────────────────────────────────────────────────────────────────────┘" -ForegroundColor Yellow
+    Write-Host "  ┌─ What to do: ───────────────────────────────────────────────────────────────────┐" -ForegroundColor Yellow
+    Write-Host "  │  1. Install Node.js 18+ from https://nodejs.org/ (LTS recommended)              │" -ForegroundColor Yellow
+    Write-Host "  │  2. Re-run:                                                                     │" -ForegroundColor Yellow
+    Write-Host "  │     irm https://raw.githubusercontent.com/$REPO/main/scripts/install.ps1 | iex  |" -ForegroundColor Yellow
+    Write-Host "  └─────────────────────────────────────────────────────────────────────────────────┘" -ForegroundColor Yellow
     exit 1
 }
 $nodeVer = (node --version 2>&1) -replace 'v', ''
@@ -100,11 +100,11 @@ $nodeMajor = [int]($nodeVer.Split('.')[0])
 if ($nodeMajor -lt 18) {
     Write-Host "  [ERROR] Node.js 18+ required (found $nodeVer)" -ForegroundColor Red
     Write-Host ""
-    Write-Host "  ┌─ What to do: ─────────────────────────────────────────────────────────────┐" -ForegroundColor Yellow
-    Write-Host "  │  1. Install Node.js 18+ from https://nodejs.org/ (LTS recommended)        │" -ForegroundColor Yellow
-    Write-Host "  │  2. Re-run:                                                                │" -ForegroundColor Yellow
-    Write-Host "  │     irm https://raw.githubusercontent.com/$REPO/main/scripts/install.ps1 | iex" -ForegroundColor Yellow
-    Write-Host "  └────────────────────────────────────────────────────────────────────────────┘" -ForegroundColor Yellow
+    Write-Host "  ┌─ What to do: ───────────────────────────────────────────────────────────────────┐" -ForegroundColor Yellow
+    Write-Host "  │  1. Install Node.js 18+ from https://nodejs.org/ (LTS recommended)              │" -ForegroundColor Yellow
+    Write-Host "  │  2. Re-run:                                                                     │" -ForegroundColor Yellow
+    Write-Host "  │     irm https://raw.githubusercontent.com/$REPO/main/scripts/install.ps1 | iex  |" -ForegroundColor Yellow
+    Write-Host "  └─────────────────────────────────────────────────────────────────────────────────┘" -ForegroundColor Yellow
     exit 1
 }
 Write-Host "  [OK] Node.js $nodeVer" -ForegroundColor Green
@@ -115,11 +115,11 @@ if (-not $copilot) {
     if (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
         Write-Host "  [ERROR] npm not found (should be installed with Node.js)." -ForegroundColor Red
         Write-Host ""
-        Write-Host "  ┌─ What to do: ─────────────────────────────────────────────────────────────┐" -ForegroundColor Yellow
-        Write-Host "  │  1. Re-install Node.js 18+ from https://nodejs.org/ (LTS recommended)     │" -ForegroundColor Yellow
-        Write-Host "  │  2. Re-run:                                                                │" -ForegroundColor Yellow
-        Write-Host "  │     irm https://raw.githubusercontent.com/$REPO/main/scripts/install.ps1 | iex" -ForegroundColor Yellow
-        Write-Host "  └────────────────────────────────────────────────────────────────────────────┘" -ForegroundColor Yellow
+        Write-Host "  ┌─ What to do: ───────────────────────────────────────────────────────────────────┐" -ForegroundColor Yellow
+        Write-Host "  │  1. Re-install Node.js 18+ from https://nodejs.org/ (LTS recommended)           │" -ForegroundColor Yellow
+        Write-Host "  │  2. Re-run:                                                                     │" -ForegroundColor Yellow
+        Write-Host "  │     irm https://raw.githubusercontent.com/$REPO/main/scripts/install.ps1 | iex  |" -ForegroundColor Yellow
+        Write-Host "  └─────────────────────────────────────────────────────────────────────────────────┘" -ForegroundColor Yellow
         exit 1
     }
     Write-Host "  Installing GitHub Copilot CLI..." -ForegroundColor Yellow
@@ -156,9 +156,9 @@ try {
 }
 
 Write-Host ""
-Write-Host "  ┌─────────────────────────────────────────────────────┐" -ForegroundColor Yellow
-Write-Host "  │  ⏳ This may take 5-8 minutes — please wait...     │" -ForegroundColor Yellow
-Write-Host "  └─────────────────────────────────────────────────────┘" -ForegroundColor Yellow
+Write-Host "  ┌───────────────────────────────────────────────────┐" -ForegroundColor Yellow
+Write-Host "  │   This may take 5-8 minutes — please wait...      │" -ForegroundColor Yellow
+Write-Host "  └───────────────────────────────────────────────────┘" -ForegroundColor Yellow
 Write-Host ""
 
 $installed = $false
