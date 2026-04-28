@@ -192,20 +192,188 @@ echo -e "${CYAN}  Copilot Console Installer${NC}"
 echo -e "${GRAY}  ====================================${NC}"
 echo ""
 
-# --- Check/Install curl ---
-if ! have curl; then
-    echo -e "${YELLOW}  curl not found — attempting to install...${NC}"
-    if [[ "$OSTYPE" == "darwin"* ]] && have brew; then
-        run "brew install curl" brew install curl
-    elif have apt-get && have sudo; then
-        run_sh "sudo apt-get update && sudo apt-get install curl" \
-            "sudo apt-get update -qq && sudo apt-get install -y -qq curl 2>&1 | tail -n1 | sed 's/^/  /'"
-    elif have dnf && have sudo; then
-        run_sh "sudo dnf install curl" "sudo dnf install -y curl 2>&1 | tail -n1 | sed 's/^/  /'"
-    elif have yum && have sudo; then
-        run_sh "sudo yum install curl" "sudo yum install -y curl 2>&1 | tail -n1 | sed 's/^/  /'"
+# --- Preflight: detect ALL missing system dependencies and prompt ONCE ---
+# We never silently auto-install. Catalog everything that's missing, ask the
+# user once, then either install + exit (asking for re-run) or print manual
+# instructions and exit.
+
+# Echoes the OS-specific install command for the named dep, or empty if no
+# auto-install is possible (no pkg manager, no sudo, etc.).
+_dep_install_cmd() {
+    local name="$1"
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        case "$name" in
+            copilot) echo "npm install -g @github/copilot"; return ;;
+        esac
+        if have brew; then
+            case "$name" in
+                curl)    echo "brew install curl" ;;
+                python3) echo "brew install python" ;;
+                nodejs)  echo "brew install node" ;;
+                pip)     echo "" ;;
+                ripgrep) echo "brew install ripgrep" ;;
+            esac
+        fi
+        return
+    fi
+    case "$name" in
+        copilot) echo "npm install -g @github/copilot"; return ;;
+    esac
+    local mgr="" pkg=""
+    if   have apt-get && have sudo; then mgr="apt"
+    elif have dnf     && have sudo; then mgr="dnf"
+    elif have yum     && have sudo; then mgr="yum"
+    fi
+    case "$name" in
+        curl)    pkg="curl" ;;
+        python3) pkg="python3" ;;
+        nodejs)  pkg="nodejs npm" ;;
+        pip)     pkg="python3-pip" ;;
+        ripgrep) pkg="ripgrep" ;;
+    esac
+    case "$mgr" in
+        apt) echo "sudo apt-get update -qq && sudo apt-get install -y $pkg" ;;
+        dnf) echo "sudo dnf install -y $pkg" ;;
+        yum) echo "sudo yum install -y $pkg" ;;
+    esac
+}
+
+# Echoes manual install instructions for the named dep (one line per echo).
+_dep_manual_lines() {
+    local name="$1"
+    case "$name" in
+        curl)
+            if [[ "$OSTYPE" == "darwin"* ]]; then
+                echo "brew install curl"
+                echo "(or: xcode-select --install   # reinstall macOS CLT)"
+            else
+                echo "sudo apt install curl     # Debian/Ubuntu"
+                echo "sudo dnf install curl     # Fedora/RHEL"
+            fi ;;
+        python3)
+            if [[ "$OSTYPE" == "darwin"* ]]; then
+                echo "brew install python       # requires Homebrew (https://brew.sh)"
+            else
+                echo "sudo apt install python3       # Debian/Ubuntu"
+                echo "sudo dnf install python3       # Fedora/RHEL"
+            fi ;;
+        nodejs)
+            if [[ "$OSTYPE" == "darwin"* ]]; then
+                echo "brew install node"
+            else
+                echo "sudo apt install nodejs npm    # Debian/Ubuntu"
+                echo "sudo dnf install nodejs npm    # Fedora/RHEL"
+            fi ;;
+        pip)
+            echo "sudo apt install python3-pip   # Debian/Ubuntu"
+            echo "sudo dnf install python3-pip   # Fedora/RHEL"
+            echo "(macOS: pip ships with brew python)" ;;
+        ripgrep)
+            if [[ "$OSTYPE" == "darwin"* ]]; then
+                echo "brew install ripgrep"
+            else
+                echo "sudo apt install ripgrep       # Debian/Ubuntu"
+                echo "sudo dnf install ripgrep       # Fedora/RHEL"
+            fi ;;
+        copilot)
+            echo "npm install -g @github/copilot"
+            echo "(may require sudo if global node_modules is system-owned)" ;;
+    esac
+}
+
+declare -a MISSING_DEPS=()
+have curl    || MISSING_DEPS+=(curl)
+have python3 || MISSING_DEPS+=(python3)
+have node    || MISSING_DEPS+=(nodejs)
+if ! have python3 || ! python3 -m pip --version &> /dev/null; then
+    MISSING_DEPS+=(pip)
+fi
+have rg      || MISSING_DEPS+=(ripgrep)
+have copilot || MISSING_DEPS+=(copilot)
+
+if [ ${#MISSING_DEPS[@]} -gt 0 ]; then
+    declare -a SUMMARY_LINES=()
+    declare -a INSTALLABLE=()
+    declare -a NOT_INSTALLABLE=()
+    for dep in "${MISSING_DEPS[@]}"; do
+        cmd=$(_dep_install_cmd "$dep")
+        if [ -n "$cmd" ]; then
+            SUMMARY_LINES+=("$dep:")
+            SUMMARY_LINES+=("    $cmd")
+            INSTALLABLE+=("$dep")
+        else
+            SUMMARY_LINES+=("$dep:  (no auto-install available)")
+            NOT_INSTALLABLE+=("$dep")
+        fi
+    done
+    echo -e "${YELLOW}  The following required dependencies are missing.${NC}"
+    echo ""
+    boxed -h "Missing dependencies — proposed install commands" "${SUMMARY_LINES[@]}"
+
+    print_manual_for_all() {
+        for dep in "${MISSING_DEPS[@]}"; do
+            echo ""
+            local lines=()
+            while IFS= read -r line; do lines+=("$line"); done < <(_dep_manual_lines "$dep")
+            boxed -h "Install $dep manually" "${lines[@]}"
+        done
+    }
+
+    if [ ${#INSTALLABLE[@]} -eq 0 ]; then
+        echo ""
+        echo -e "${RED}  No deps can be auto-installed on this system.${NC}"
+        print_manual_for_all
+        echo ""
+        echo -e "${YELLOW}  After installing, re-run this installer.${NC}"
+        die
+    fi
+
+    echo ""
+    prompt_yn "Install the listed dependencies now? (Y/n)" REPLY
+    if [[ "${REPLY:-Y}" =~ ^[Nn] ]]; then
+        echo ""
+        echo -e "${YELLOW}  Skipping auto-install. Manual instructions below.${NC}"
+        print_manual_for_all
+        echo ""
+        echo -e "${YELLOW}  After installing, re-run this installer.${NC}"
+        die
+    fi
+
+    echo ""
+    echo -e "${CYAN}  Installing missing dependencies...${NC}"
+    INSTALL_FAILED=0
+    for dep in "${INSTALLABLE[@]}"; do
+        cmd=$(_dep_install_cmd "$dep")
+        echo -e "${GRAY}  → $dep${NC}"
+        run_sh "install $dep: $cmd" "$cmd" || INSTALL_FAILED=1
+    done
+
+    if [ ${#NOT_INSTALLABLE[@]} -gt 0 ]; then
+        echo ""
+        echo -e "${YELLOW}  The following deps require manual installation:${NC}"
+        for dep in "${NOT_INSTALLABLE[@]}"; do
+            echo ""
+            lines=()
+            while IFS= read -r line; do lines+=("$line"); done < <(_dep_manual_lines "$dep")
+            boxed -h "Install $dep manually" "${lines[@]}"
+        done
+    fi
+
+    echo ""
+    if [ "$INSTALL_FAILED" = 1 ]; then
+        echo -e "${RED}  One or more installs failed. See output above.${NC}"
+    fi
+    boxed -c "$GREEN" -h "Next steps" \
+        "Dependencies handled. Please re-run this installer to continue:" \
+        "   curl -fsSL https://raw.githubusercontent.com/$REPO/main/scripts/install.sh | bash"
+    if [ "$DRY_RUN" = 1 ] || [ "$ASSUME_DEPS_MISSING" = 1 ]; then
+        printf "  ${DRY}[DRY-RUN]${NC} would exit 0 (continuing to show remaining messages)\n"
+    else
+        exit 0
     fi
 fi
+
+# --- Curl safety net (preflight should have handled this) ---
 if ! have curl; then
     echo -e "${RED}  [ERROR] curl not found and could not be installed automatically.${NC}"
     if [[ "$OSTYPE" == "darwin"* ]]; then
@@ -327,26 +495,14 @@ if have node; then
     echo -e "${GREEN}  [OK] Node.js $NODE_VERSION${NC}"
 fi
 
-# --- Check/Install Copilot CLI ---
+# --- Copilot CLI safety net (preflight should have handled this) ---
 if ! have copilot; then
-    echo -e "${YELLOW}  Installing GitHub Copilot CLI...${NC}"
-    # Try without sudo first, then with sudo (Linux often needs it for global installs)
-    if [ "$DRY_RUN" = 1 ]; then
-        run "npm install -g @github/copilot" npm install -g @github/copilot
-    elif npm install -g @github/copilot &> /dev/null 2>&1; then
-        true  # success
-    elif have sudo; then
-        echo -e "${GRAY}  Retrying with sudo...${NC}"
-        sudo npm install -g @github/copilot &> /dev/null 2>&1 || true
-    fi
-    if ! have copilot && [ "$DRY_RUN" != 1 ]; then
-        echo -e "${RED}  [ERROR] Failed to install Copilot CLI${NC}"
-        boxed -h "What to do" \
-            "1. Install manually:  sudo npm install -g @github/copilot" \
-            "2. Re-run:" \
-            "   curl -fsSL https://raw.githubusercontent.com/$REPO/main/scripts/install.sh | bash"
-        die
-    fi
+    echo -e "${RED}  [ERROR] Copilot CLI not found.${NC}"
+    boxed -h "What to do" \
+        "1. Install manually:  sudo npm install -g @github/copilot" \
+        "2. Re-run:" \
+        "   curl -fsSL https://raw.githubusercontent.com/$REPO/main/scripts/install.sh | bash"
+    die
 fi
 COPILOT_VERSION=$(copilot --version 2>&1 | head -n1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+(-[0-9]+)?' || echo "unknown")
 echo -e "${GREEN}  [OK] Copilot CLI $COPILOT_VERSION${NC}"
@@ -383,42 +539,16 @@ echo ""
 boxed -c "$YELLOW" "⏳ This may take 5-8 minutes — please wait..."
 echo ""
 
-# --- Ensure pip is available (Ubuntu/Debian often ship without it) ---
+# --- pip safety net (preflight should have handled this) ---
 if ! python3 -m pip --version &> /dev/null; then
-    echo -e "${YELLOW}  pip not found — installing python3-pip...${NC}"
-    if have apt-get; then
-        if have sudo; then
-            run_sh "sudo apt-get update && sudo apt-get install python3-pip" \
-                "sudo apt-get update -qq && sudo apt-get install -y -qq python3-pip 2>&1 | tail -n1 | sed 's/^/  /'"
-        else
-            echo -e "${YELLOW}  [WARN] sudo not available. Install manually: apt install python3-pip${NC}"
-        fi
-    elif have dnf; then
-        if have sudo; then
-            run_sh "sudo dnf install python3-pip" \
-                "sudo dnf install -y python3-pip 2>&1 | tail -n1 | sed 's/^/  /'"
-        else
-            echo -e "${YELLOW}  [WARN] sudo not available. Install manually: dnf install python3-pip${NC}"
-        fi
-    elif have yum; then
-        if have sudo; then
-            run_sh "sudo yum install python3-pip" \
-                "sudo yum install -y python3-pip 2>&1 | tail -n1 | sed 's/^/  /'"
-        else
-            echo -e "${YELLOW}  [WARN] sudo not available. Install manually: yum install python3-pip${NC}"
-        fi
-    fi
-    if ! python3 -m pip --version &> /dev/null; then
-        echo -e "${RED}  [ERROR] Could not install pip.${NC}"
-        boxed -h "What to do" \
-            "1. Install pip manually:" \
-            "     sudo apt install python3-pip   # Debian/Ubuntu" \
-            "     sudo dnf install python3-pip   # Fedora/RHEL" \
-            "2. Re-run:" \
-            "   curl -fsSL https://raw.githubusercontent.com/$REPO/main/scripts/install.sh | bash"
-        die
-    fi
-    echo -e "${GREEN}  [OK] pip installed${NC}"
+    echo -e "${RED}  [ERROR] pip not available.${NC}"
+    boxed -h "What to do" \
+        "1. Install pip manually:" \
+        "     sudo apt install python3-pip   # Debian/Ubuntu" \
+        "     sudo dnf install python3-pip   # Fedora/RHEL" \
+        "2. Re-run:" \
+        "   curl -fsSL https://raw.githubusercontent.com/$REPO/main/scripts/install.sh | bash"
+    die
 fi
 
 PIP_USER_FLAG="--user"
@@ -554,101 +684,14 @@ else
     echo -e "${YELLOW}  [NOTE] Restart your terminal, then run 'copilot-console'.${NC}"
 fi
 
-# --- Install ripgrep (for cross-session search) ---
+# --- ripgrep safety net (preflight should have handled this) ---
 if ! have rg; then
     echo ""
-    echo -e "${YELLOW}  Installing ripgrep (for cross-session search)...${NC}"
+    echo -e "${YELLOW}  [WARN] ripgrep not installed. Cross-session content search will not work.${NC}"
     if [[ "$OSTYPE" == "darwin"* ]]; then
-        # macOS: try brew, fallback to binary download
-        if have brew; then
-            run "brew install ripgrep" brew install ripgrep
-        fi
-        if ! have rg; then
-            # Fallback: download binary from GitHub releases
-            RG_VERSION="14.1.1"
-            ARCH=$(uname -m)
-            if [ "$ARCH" = "arm64" ]; then
-                RG_TARGET="aarch64-apple-darwin"
-            else
-                RG_TARGET="x86_64-apple-darwin"
-            fi
-            RG_URL="https://github.com/BurntSushi/ripgrep/releases/download/${RG_VERSION}/ripgrep-${RG_VERSION}-${RG_TARGET}.tar.gz"
-            RG_TMP=$(mktemp -d)
-            echo -e "${GRAY}  Downloading ripgrep v${RG_VERSION} binary...${NC}"
-            if [ "$DRY_RUN" = 1 ]; then
-                run_sh "download & extract ripgrep from $RG_URL" "curl -fsSL '$RG_URL' | tar xz -C '$RG_TMP'"
-                run "install rg into ~/.local/bin" cp "ripgrep/rg" "$HOME/.local/bin/rg"
-                run "chmod +x ~/.local/bin/rg" chmod +x "$HOME/.local/bin/rg"
-                for profile in "$HOME/.zshrc" "$HOME/.bashrc"; do
-                    run_sh "append PATH export to $profile" "echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> '$profile'"
-                done
-                run "cleanup tmp dir" rm -rf "$RG_TMP"
-            elif curl -fsSL "$RG_URL" | tar xz -C "$RG_TMP" 2>/dev/null; then
-                mkdir -p "$HOME/.local/bin"
-                cp "$RG_TMP/ripgrep-${RG_VERSION}-${RG_TARGET}/rg" "$HOME/.local/bin/rg"
-                chmod +x "$HOME/.local/bin/rg"
-                export PATH="$HOME/.local/bin:$PATH"
-                # Persist in shell profile if not already there
-                for profile in "$HOME/.zshrc" "$HOME/.bashrc"; do
-                    if [ -f "$profile" ] && ! grep -q '\.local/bin' "$profile" 2>/dev/null; then
-                        echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$profile"
-                    fi
-                done
-                rm -rf "$RG_TMP"
-            else
-                rm -rf "$RG_TMP"
-            fi
-        fi
-        if have rg; then
-            echo -e "${GREEN}  [OK] ripgrep installed${NC}"
-        else
-            echo -e "${YELLOW}  [WARN] ripgrep install failed. Cross-session content search will not work.${NC}"
-            echo -e "${YELLOW}     Install manually: brew install ripgrep${NC}"
-        fi
+        echo -e "${YELLOW}     Install manually: brew install ripgrep${NC}"
     else
-        # Linux
-        if have apt-get; then
-            echo -e "${GRAY}  (may require sudo password)${NC}"
-            if have sudo; then
-                run_sh "sudo apt-get install ripgrep" "sudo apt-get update &> /dev/null && sudo apt-get install -y ripgrep &> /dev/null"
-            else
-                echo -e "${YELLOW}  [WARN] sudo not available. Install manually: apt install ripgrep${NC}"
-            fi
-            if have rg; then
-                echo -e "${GREEN}  [OK] ripgrep installed${NC}"
-            else
-                echo -e "${YELLOW}  [WARN] ripgrep install failed. Cross-session content search will not work.${NC}"
-                echo -e "${YELLOW}     Install manually: sudo apt-get install ripgrep${NC}"
-            fi
-        elif have dnf; then
-            echo -e "${GRAY}  (may require sudo password)${NC}"
-            if have sudo; then
-                run "sudo dnf install ripgrep" sudo dnf install -y ripgrep
-            else
-                echo -e "${YELLOW}  [WARN] sudo not available. Install manually: dnf install ripgrep${NC}"
-            fi
-            if have rg; then
-                echo -e "${GREEN}  [OK] ripgrep installed${NC}"
-            else
-                echo -e "${YELLOW}  [WARN] ripgrep install failed. Cross-session content search will not work.${NC}"
-                echo -e "${YELLOW}     Install manually: sudo dnf install ripgrep${NC}"
-            fi
-        elif have yum; then
-            echo -e "${GRAY}  (may require sudo password)${NC}"
-            if have sudo; then
-                run "sudo yum install ripgrep" sudo yum install -y ripgrep
-            else
-                echo -e "${YELLOW}  [WARN] sudo not available. Install manually: yum install ripgrep${NC}"
-            fi
-            if have rg; then
-                echo -e "${GREEN}  [OK] ripgrep installed${NC}"
-            else
-                echo -e "${YELLOW}  [WARN] ripgrep install failed. Cross-session content search will not work.${NC}"
-                echo -e "${YELLOW}     Install manually: sudo yum install ripgrep${NC}"
-            fi
-        else
-            echo -e "${YELLOW}  [WARN] No supported package manager found. Install ripgrep manually for your distribution.${NC}"
-        fi
+        echo -e "${YELLOW}     Install manually: sudo apt install ripgrep   # (or dnf/yum)${NC}"
     fi
 else
     RG_VERSION=$(rg --version 2>&1 | head -n1)
