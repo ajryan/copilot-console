@@ -74,7 +74,7 @@ function Get-DisplayWidth {
 # Use this instead of hand-drawn box characters so $variable expansion never breaks alignment.
 function Write-Boxed {
     param(
-        [Parameter(Mandatory)][string[]]$Lines,
+        [Parameter(Mandatory)][AllowEmptyString()][string[]]$Lines,
         [string]$Heading,
         [ConsoleColor]$Color = [ConsoleColor]::Yellow,
         [string]$Indent = '  '
@@ -100,6 +100,67 @@ function Write-Boxed {
     Write-Host ($Indent + $bot) -ForegroundColor $Color
 }
 
+# Auto-confirms under -WhatIf or -AssumeDependenciesMissing so dry-runs always
+# exercise the "user said yes" branch. Reads from the host console otherwise,
+# which works correctly even when the script is piped via `irm | iex`.
+function Prompt-YesNo {
+    param(
+        [Parameter(Mandatory)][string]$Question,
+        [bool]$DefaultYes = $true
+    )
+    if ($WhatIfPreference -or $AssumeDependenciesMissing) {
+        Write-Host "  [DRYRUN] Would prompt: $Question" -ForegroundColor DarkCyan
+        return $true
+    }
+    $suffix = if ($DefaultYes) { '(Y/n)' } else { '(y/N)' }
+    $ans = Read-Host "  $Question $suffix"
+    if ([string]::IsNullOrWhiteSpace($ans)) { return $DefaultYes }
+    return ($ans -match '^[Yy]')
+}
+
+# Returns the auto-install command for a known dep, or '' if no auto-install path
+# applies on this machine. Copilot CLI is always installable via npm (which we
+# require anyway); the rest go through winget when available.
+function Get-DepInstallCmd {
+    param([string]$Dep, [bool]$HasWinget)
+    switch ($Dep) {
+        'python'  { if ($HasWinget) { 'winget install -e --id Python.Python.3.11 --accept-source-agreements --accept-package-agreements --disable-interactivity' } else { '' } }
+        'nodejs'  { if ($HasWinget) { 'winget install -e --id OpenJS.NodeJS.LTS --accept-source-agreements --accept-package-agreements --disable-interactivity' } else { '' } }
+        'ripgrep' { if ($HasWinget) { 'winget install -e --id BurntSushi.ripgrep.MSVC --accept-source-agreements --accept-package-agreements --disable-interactivity' } else { '' } }
+        'copilot' { 'npm install -g @github/copilot' }
+        default   { '' }
+    }
+}
+
+# Manual install instructions shown in a box when the user declines auto-install
+# or when no auto-install path is available.
+function Get-DepManualLines {
+    param([string]$Dep)
+    switch ($Dep) {
+        'python'  { @(
+            'Install Python 3.11+ from https://www.python.org/downloads/',
+            'Or via winget:',
+            '  winget install -e --id Python.Python.3.11'
+        ) }
+        'nodejs'  { @(
+            'Install Node.js 18+ LTS from https://nodejs.org/',
+            'Or via winget:',
+            '  winget install -e --id OpenJS.NodeJS.LTS'
+        ) }
+        'ripgrep' { @(
+            'Install ripgrep via winget:',
+            '  winget install -e --id BurntSushi.ripgrep.MSVC',
+            'Or download a release from:',
+            '  https://github.com/BurntSushi/ripgrep/releases'
+        ) }
+        'copilot' { @(
+            'Install GitHub Copilot CLI (requires Node.js / npm):',
+            '  npm install -g @github/copilot'
+        ) }
+        default   { @("Install $Dep manually.") }
+    }
+}
+
 # Allow .ps1 wrappers (npm.ps1, pip.ps1, etc.) to run in this process only
 if ($PSCmdlet.ShouldProcess('current PowerShell process', 'Set ExecutionPolicy Bypass')) {
     Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
@@ -112,6 +173,97 @@ Write-Host ""
 
 # Refresh PATH from registry (picks up recent installs without terminal restart)
 $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
+
+# --- Preflight: catalog ALL missing deps, then ask ONCE -------------------
+# Detect every system-level dependency we need before doing any work, show
+# the user a single summary, and let them opt in to a batched install. If
+# they decline (or no auto-install path is available), print per-dep manual
+# instructions and bail. After a successful batched install we exit 0 and
+# ask the user to re-run so the freshly-installed tools are picked up
+# cleanly (PATH refresh in-process is unreliable for npm / pip / Scripts dirs).
+$missingDeps = @()
+$pythonOk = $false
+if (Get-CommandSafe python) {
+    if ($AssumeDependenciesMissing) {
+        $missingDeps += 'python'
+    } else {
+        $pyVerOutput = (python --version 2>&1) | Out-String
+        if ($pyVerOutput -match 'Python \d+\.\d+') { $pythonOk = $true } else { $missingDeps += 'python' }
+    }
+} else {
+    $missingDeps += 'python'
+}
+if (-not (Get-CommandSafe node))    { $missingDeps += 'nodejs' }
+if (-not (Get-CommandSafe rg))      { $missingDeps += 'ripgrep' }
+if (-not (Get-CommandSafe copilot)) { $missingDeps += 'copilot' }
+
+if ($missingDeps.Count -gt 0) {
+    $hasWinget = [bool](Get-CommandSafe winget)
+    $boxLines = @('The following dependencies are missing:', '')
+    foreach ($d in $missingDeps) {
+        $cmd = Get-DepInstallCmd -Dep $d -HasWinget $hasWinget
+        if ([string]::IsNullOrEmpty($cmd)) {
+            $boxLines += "  - $d  (no auto-install available — winget not found)"
+        } else {
+            $boxLines += "  - $d"
+            $boxLines += "      $cmd"
+        }
+    }
+    $boxLines += ''
+    $boxLines += 'After installation completes, the script will exit so you can'
+    $boxLines += 're-run it and pick up the freshly-installed tools cleanly.'
+    Write-Host ''
+    Write-Boxed -Heading 'Missing dependencies' -Lines $boxLines -Color Yellow
+    Write-Host ''
+
+    if (Prompt-YesNo -Question 'Install missing dependencies now?') {
+        $manualOnly  = @()
+        $installFailed = @()
+        foreach ($d in $missingDeps) {
+            $cmd = Get-DepInstallCmd -Dep $d -HasWinget $hasWinget
+            if ([string]::IsNullOrEmpty($cmd)) {
+                $manualOnly += $d
+                continue
+            }
+            Write-Host "  Installing $d..." -ForegroundColor Yellow
+            if ($PSCmdlet.ShouldProcess($d, $cmd)) {
+                Invoke-Expression $cmd 2>&1 | Out-Null
+                if ($LASTEXITCODE -ne 0) {
+                    Write-Host "  [WARN] $d install exited with code $LASTEXITCODE" -ForegroundColor Yellow
+                    $installFailed += $d
+                }
+                # Refresh PATH after each install so a later step (e.g. copilot
+                # via npm) can find tools dropped by an earlier step (node).
+                $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+            }
+        }
+        if ($manualOnly.Count -gt 0 -or $installFailed.Count -gt 0) {
+            foreach ($d in ($manualOnly + $installFailed)) {
+                Write-Host ''
+                Write-Boxed -Heading "Manual install: $d" -Lines (Get-DepManualLines $d) -Color Yellow
+            }
+        }
+        Write-Host ''
+        Write-Boxed -Heading 'Next steps' -Lines @(
+            'Dependency installation finished.',
+            'Re-run the installer to continue setup:',
+            "  irm https://raw.githubusercontent.com/$REPO/main/scripts/install.ps1 | iex"
+        ) -Color Cyan
+        if ($WhatIfPreference -or $AssumeDependenciesMissing) {
+            Write-Host "  [DRYRUN] Would exit 0" -ForegroundColor DarkCyan
+        } else {
+            exit 0
+        }
+    } else {
+        foreach ($d in $missingDeps) {
+            Write-Host ''
+            Write-Boxed -Heading "Manual install: $d" -Lines (Get-DepManualLines $d) -Color Yellow
+        }
+        Write-Host ''
+        Write-Host '  Re-run the installer after installing the dependencies above.' -ForegroundColor Yellow
+        Exit-IfReal 1
+    }
+}
 
 # --- Check Python ---
 $python = Get-CommandSafe python
@@ -216,28 +368,16 @@ if ($node) {
     Write-Host "  [OK] Node.js $nodeVer" -ForegroundColor Green
 }
 
-# --- Check/Install Copilot CLI ---
+# --- Verify Copilot CLI ---
+# Auto-install was moved to the consolidated preflight at the top of this
+# script. If we reach here without copilot on PATH, preflight either failed
+# silently or was bypassed — surface a clear manual instruction and bail.
 $copilot = Get-CommandSafe copilot
 if (-not $copilot) {
-    if (-not (Get-CommandSafe npm)) {
-        Write-Host "  [ERROR] npm not found (should be installed with Node.js)." -ForegroundColor Red
-        Write-Host ""
-        Write-Boxed -Heading 'What to do' -Lines @(
-            '1. Re-install Node.js 18+ from https://nodejs.org/ (LTS recommended)'
-            '2. Re-run:'
-            "   irm https://raw.githubusercontent.com/$REPO/main/scripts/install.ps1 | iex"
-        )
-        Exit-IfReal 1
-    }
-    Write-Host "  Installing GitHub Copilot CLI..." -ForegroundColor Yellow
-    if ($PSCmdlet.ShouldProcess("@github/copilot", "npm install -g")) {
-        npm install -g @github/copilot 2>&1 | Out-Null
-        $copilot = Get-CommandSafe copilot
-        if (-not $copilot) {
-            Write-Host "  [ERROR] Failed to install Copilot CLI" -ForegroundColor Red
-            Exit-IfReal 1
-        }
-    }
+    Write-Host "  [ERROR] GitHub Copilot CLI not found." -ForegroundColor Red
+    Write-Host ""
+    Write-Boxed -Heading 'What to do' -Lines (Get-DepManualLines 'copilot')
+    Exit-IfReal 1
 }
 if ($copilot) {
     $copilotVer = ((copilot --version 2>&1) | Select-Object -First 1) -replace '.*?(\d+\.\d+\.\d+[-\d]*).*', '$1'
@@ -367,57 +507,16 @@ if ($ac) {
     Write-Host "  [NOTE] Restart your terminal, then run 'copilot-console'." -ForegroundColor Yellow
 }
 
-# --- Install ripgrep (for cross-session search) ---
+# --- Verify ripgrep (for cross-session search; non-fatal) ---
+# Auto-install was moved to the consolidated preflight at the top of this
+# script. ripgrep is non-fatal — if missing here, just warn and show manual
+# instructions; cross-session content search will be degraded but the rest
+# of the installer works.
 $rg = Get-CommandSafe rg
 if (-not $rg) {
     Write-Host ""
-    Write-Host "  Installing ripgrep (for cross-session search)..." -ForegroundColor Yellow
-
-    # Try winget first
-    $winget = Get-CommandSafe winget
-    if ($winget) {
-        if ($PSCmdlet.ShouldProcess("BurntSushi.ripgrep.MSVC", "winget install")) {
-            winget install BurntSushi.ripgrep.MSVC --accept-source-agreements --accept-package-agreements --disable-interactivity 2>&1 | Out-Null
-            $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
-            $rg = Get-CommandSafe rg
-        }
-    }
-
-    # Fallback: download binary from GitHub releases
-    if (-not $rg) {
-        $rgVersion = "14.1.1"
-        $rgUrl = "https://github.com/BurntSushi/ripgrep/releases/download/$rgVersion/ripgrep-$rgVersion-x86_64-pc-windows-msvc.zip"
-        $rgInstallDir = "$env:LOCALAPPDATA\Programs\ripgrep"
-        $rgZip = "$env:TEMP\ripgrep.zip"
-        if ($PSCmdlet.ShouldProcess($rgInstallDir, "Download and install ripgrep v$rgVersion")) {
-            try {
-                Write-Host "  Downloading ripgrep v$rgVersion binary..." -ForegroundColor Gray
-                Invoke-WebRequest -Uri $rgUrl -OutFile $rgZip -UseBasicParsing
-                New-Item -ItemType Directory -Path $rgInstallDir -Force | Out-Null
-                Expand-Archive -Path $rgZip -DestinationPath "$env:TEMP\ripgrep-extract" -Force
-                Copy-Item "$env:TEMP\ripgrep-extract\ripgrep-$rgVersion-x86_64-pc-windows-msvc\rg.exe" "$rgInstallDir\rg.exe" -Force
-                Remove-Item $rgZip -Force -ErrorAction SilentlyContinue
-                Remove-Item "$env:TEMP\ripgrep-extract" -Recurse -Force -ErrorAction SilentlyContinue
-
-                # Add to user PATH if not already there
-                $userPath = [System.Environment]::GetEnvironmentVariable("Path", "User")
-                if ($userPath -notlike "*$rgInstallDir*") {
-                    [System.Environment]::SetEnvironmentVariable("Path", "$userPath;$rgInstallDir", "User")
-                }
-                $env:Path = "$env:Path;$rgInstallDir"
-                $rg = Get-CommandSafe rg
-            } catch {
-                Write-Host "  [WARN] Binary download failed: $_" -ForegroundColor Yellow
-            }
-        }
-    }
-
-    if (-not $rg) {
-        Write-Host "  [WARN] ripgrep install failed. Cross-session content search will not work." -ForegroundColor Yellow
-        Write-Host "     Install manually: winget install BurntSushi.ripgrep.MSVC" -ForegroundColor Yellow
-    } else {
-        Write-Host "  [OK] ripgrep installed" -ForegroundColor Green
-    }
+    Write-Host "  [WARN] ripgrep not found. Cross-session content search will not work." -ForegroundColor Yellow
+    Write-Boxed -Heading 'Manual install: ripgrep' -Lines (Get-DepManualLines 'ripgrep')
 } else {
     Write-Host "  [OK] ripgrep $(rg --version | Select-Object -First 1)" -ForegroundColor Green
 }
