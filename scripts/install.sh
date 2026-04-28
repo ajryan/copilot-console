@@ -192,9 +192,22 @@ echo -e "${CYAN}  Copilot Console Installer${NC}"
 echo -e "${GRAY}  ====================================${NC}"
 echo ""
 
-# --- Check curl ---
+# --- Check/Install curl ---
 if ! have curl; then
-    echo -e "${RED}  [ERROR] curl not found.${NC}"
+    echo -e "${YELLOW}  curl not found — attempting to install...${NC}"
+    if [[ "$OSTYPE" == "darwin"* ]] && have brew; then
+        run "brew install curl" brew install curl
+    elif have apt-get && have sudo; then
+        run_sh "sudo apt-get update && sudo apt-get install curl" \
+            "sudo apt-get update -qq && sudo apt-get install -y -qq curl 2>&1 | tail -n1 | sed 's/^/  /'"
+    elif have dnf && have sudo; then
+        run_sh "sudo dnf install curl" "sudo dnf install -y curl 2>&1 | tail -n1 | sed 's/^/  /'"
+    elif have yum && have sudo; then
+        run_sh "sudo yum install curl" "sudo yum install -y curl 2>&1 | tail -n1 | sed 's/^/  /'"
+    fi
+fi
+if ! have curl; then
+    echo -e "${RED}  [ERROR] curl not found and could not be installed automatically.${NC}"
     if [[ "$OSTYPE" == "darwin"* ]]; then
         if have brew; then
             boxed -h "What to do" \
