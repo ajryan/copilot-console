@@ -1,10 +1,109 @@
 # Copilot Console - One-click installer for Windows
 # Usage: irm https://raw.githubusercontent.com/sanchar10/copilot-console/main/scripts/install.ps1 | iex
+#
+# Supports PowerShell-native -WhatIf for dry-run mode (messages print, no actions execute).
+# Combine with -AssumeDependenciesMissing to exercise the "missing dependency" message
+# formatting without uninstalling anything from the machine. Example:
+#   .\install.ps1 -WhatIf -AssumeDependenciesMissing
+
+[CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Low')]
+param(
+    [switch]$AssumeDependenciesMissing
+)
 
 $REPO = "sanchar10/copilot-console"
 
+# Returns $null when -AssumeDependenciesMissing is set so the "dependency missing"
+# branches can be exercised on a fully-provisioned machine.
+function Get-CommandSafe {
+    param([string]$Name)
+    if ($AssumeDependenciesMissing) { return $null }
+    return Get-Command $Name -ErrorAction SilentlyContinue
+}
+
+# Honors -WhatIf and -AssumeDependenciesMissing so the installer keeps running
+# during a dry-run instead of bailing on the first simulated failure.
+function Exit-IfReal {
+    param([int]$Code = 1)
+    if ($WhatIfPreference -or $AssumeDependenciesMissing) {
+        Write-Host "  [DRYRUN] Would exit $Code (continuing to show remaining messages)" -ForegroundColor DarkCyan
+        return
+    }
+    exit $Code
+}
+
+# Computes terminal display width, accounting for East Asian Wide and emoji
+# characters that occupy 2 cells but report a .NET .Length of 1 (BMP) or 2
+# (surrogate pair → still 2 cells, so .Length already matches display).
+function Get-DisplayWidth {
+    param([string]$Text)
+    if (-not $Text) { return 0 }
+    $width = 0
+    $i = 0
+    while ($i -lt $Text.Length) {
+        $cp = [char]::ConvertToUtf32($Text, $i)
+        $step = if ($cp -gt 0xFFFF) { 2 } else { 1 }
+        $isWide =
+            ($cp -ge 0x1100  -and $cp -le 0x115F)  -or
+            ($cp -ge 0x2329  -and $cp -le 0x232A)  -or
+            ($cp -ge 0x23E9  -and $cp -le 0x23F3)  -or  # ⏳ ⏰ etc.
+            ($cp -ge 0x2600  -and $cp -le 0x27BF)  -or  # misc symbols + dingbats
+            ($cp -ge 0x2E80  -and $cp -le 0x303E)  -or
+            ($cp -ge 0x3041  -and $cp -le 0x33FF)  -or
+            ($cp -ge 0x3400  -and $cp -le 0x4DBF)  -or
+            ($cp -ge 0x4E00  -and $cp -le 0x9FFF)  -or
+            ($cp -ge 0xA000  -and $cp -le 0xA4CF)  -or
+            ($cp -ge 0xAC00  -and $cp -le 0xD7A3)  -or
+            ($cp -ge 0xF900  -and $cp -le 0xFAFF)  -or
+            ($cp -ge 0xFE30  -and $cp -le 0xFE4F)  -or
+            ($cp -ge 0xFF00  -and $cp -le 0xFF60)  -or
+            ($cp -ge 0xFFE0  -and $cp -le 0xFFE6)  -or
+            ($cp -ge 0x1F300 -and $cp -le 0x1FAFF)
+        if ($isWide) {
+            # Surrogate pair already contributes 2 to .Length, BMP only 1.
+            $width += if ($step -eq 2) { 2 } else { 2 }
+        } else {
+            $width += $step
+        }
+        $i += $step
+    }
+    return $width
+}
+
+# Writes a box around one or more lines, auto-sizing width to the longest line.
+# Use this instead of hand-drawn box characters so $variable expansion never breaks alignment.
+function Write-Boxed {
+    param(
+        [Parameter(Mandatory)][string[]]$Lines,
+        [string]$Heading,
+        [ConsoleColor]$Color = [ConsoleColor]::Yellow,
+        [string]$Indent = '  '
+    )
+    $maxLine = 0
+    foreach ($line in $Lines) {
+        $w = Get-DisplayWidth $line
+        if ($w -gt $maxLine) { $maxLine = $w }
+    }
+    $headingSeg = if ($Heading) { "─ $Heading " } else { '' }
+    $headingWidth = Get-DisplayWidth $headingSeg
+    # Inner width = chars between ┌ and ┐. Body lines are "│  <content><pad>  │"
+    # so they need maxLine + 4 of inner space; heading needs its own segment + at
+    # least 2 trailing dashes for visual balance.
+    $inner = [Math]::Max($maxLine + 4, $headingWidth + 2)
+    $top = '┌' + $headingSeg + ('─' * ($inner - $headingWidth)) + '┐'
+    $bot = '└' + ('─' * $inner) + '┘'
+    Write-Host ($Indent + $top) -ForegroundColor $Color
+    foreach ($line in $Lines) {
+        $pad = ' ' * ($inner - 4 - (Get-DisplayWidth $line))
+        Write-Host ($Indent + '│  ' + $line + $pad + '  │') -ForegroundColor $Color
+    }
+    Write-Host ($Indent + $bot) -ForegroundColor $Color
+}
+
 # Allow .ps1 wrappers (npm.ps1, pip.ps1, etc.) to run in this process only
-Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
+if ($PSCmdlet.ShouldProcess('current PowerShell process', 'Set ExecutionPolicy Bypass')) {
+    Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
+}
 
 Write-Host ""
 Write-Host "  Copilot Console Installer" -ForegroundColor Cyan
@@ -15,7 +114,7 @@ Write-Host ""
 $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
 
 # --- Check Python ---
-$python = Get-Command python -ErrorAction SilentlyContinue
+$python = Get-CommandSafe python
 if ($python) {
     $pyVerOutput = (python --version 2>&1) | Out-String
     if ($pyVerOutput -notmatch 'Python \d+\.\d+') {
@@ -23,7 +122,7 @@ if ($python) {
         $python = $null
     }
 }
-if (-not $python) {
+if (-not $python -and -not $AssumeDependenciesMissing) {
     # Auto-detect Python from known install locations
     $pyExe = $null
     $searchPaths = @(
@@ -39,39 +138,43 @@ if (-not $python) {
         $env:Path = "$pyDir;$env:Path"
         $currentUserPath = [Environment]::GetEnvironmentVariable("Path", "User")
         if ($currentUserPath -notlike "*$pyDir*") {
-            [Environment]::SetEnvironmentVariable("Path", "$currentUserPath;$pyDir", "User")
-            Write-Host "  [OK] Added Python to PATH: $pyDir" -ForegroundColor Green
+            if ($PSCmdlet.ShouldProcess("User PATH", "Add $pyDir")) {
+                [Environment]::SetEnvironmentVariable("Path", "$currentUserPath;$pyDir", "User")
+                Write-Host "  [OK] Added Python to PATH: $pyDir" -ForegroundColor Green
+            }
         }
-        $python = Get-Command python -ErrorAction SilentlyContinue
+        $python = Get-CommandSafe python
     }
 }
 if (-not $python) {
     Write-Host "  [ERROR] Python not found." -ForegroundColor Red
     Write-Host ""
-    Write-Host "  ┌─ What to do: ───────────────────────────────────────────────────────────────────┐" -ForegroundColor Yellow
-    Write-Host "  │  1. Install Python 3.11+ from https://www.python.org/downloads/                 │" -ForegroundColor Yellow
-    Write-Host "  │  2. Re-run:                                                                     │" -ForegroundColor Yellow
-    Write-Host "  │     irm https://raw.githubusercontent.com/$REPO/main/scripts/install.ps1 | iex  |" -ForegroundColor Yellow
-    Write-Host "  └─────────────────────────────────────────────────────────────────────────────────┘" -ForegroundColor Yellow
-    exit 1
+    Write-Boxed -Heading 'What to do' -Lines @(
+        '1. Install Python 3.11+ from https://www.python.org/downloads/'
+        '2. Re-run:'
+        "   irm https://raw.githubusercontent.com/$REPO/main/scripts/install.ps1 | iex"
+    )
+    Exit-IfReal 1
 }
-$pyVer = (python --version 2>&1) -replace 'Python\s*', ''
-$pyMajor, $pyMinor = $pyVer.Split('.')[0..1] | ForEach-Object { [int]$_ }
-if ($pyMajor -lt 3 -or ($pyMajor -eq 3 -and $pyMinor -lt 11)) {
-    Write-Host "  [ERROR] Python 3.11+ required (found $pyVer)" -ForegroundColor Red
-    Write-Host ""
-    Write-Host "  ┌─ What to do: ───────────────────────────────────────────────────────────────────┐" -ForegroundColor Yellow
-    Write-Host "  │  1. Install Python 3.11+ from https://www.python.org/downloads/                 │" -ForegroundColor Yellow
-    Write-Host "  │  2. Re-run:                                                                     │" -ForegroundColor Yellow
-    Write-Host "  │     irm https://raw.githubusercontent.com/$REPO/main/scripts/install.ps1 | iex  |" -ForegroundColor Yellow
-    Write-Host "  └─────────────────────────────────────────────────────────────────────────────────┘" -ForegroundColor Yellow
-    exit 1
+if ($python) {
+    $pyVer = (python --version 2>&1) -replace 'Python\s*', ''
+    $pyMajor, $pyMinor = $pyVer.Split('.')[0..1] | ForEach-Object { [int]$_ }
+    if ($pyMajor -lt 3 -or ($pyMajor -eq 3 -and $pyMinor -lt 11)) {
+        Write-Host "  [ERROR] Python 3.11+ required (found $pyVer)" -ForegroundColor Red
+        Write-Host ""
+        Write-Boxed -Heading 'What to do' -Lines @(
+            '1. Install Python 3.11+ from https://www.python.org/downloads/'
+            '2. Re-run:'
+            "   irm https://raw.githubusercontent.com/$REPO/main/scripts/install.ps1 | iex"
+        )
+        Exit-IfReal 1
+    }
+    Write-Host "  [OK] Python $pyVer" -ForegroundColor Green
 }
-Write-Host "  [OK] Python $pyVer" -ForegroundColor Green
 
 # --- Check Node.js ---
-$node = Get-Command node -ErrorAction SilentlyContinue
-if (-not $node) {
+$node = Get-CommandSafe node
+if (-not $node -and -not $AssumeDependenciesMissing) {
     # Auto-detect Node.js from known install location
     $nodeExe = "$env:ProgramFiles\nodejs\node.exe"
     if (Test-Path $nodeExe) {
@@ -79,59 +182,67 @@ if (-not $node) {
         $env:Path = "$nodeDir;$env:Path"
         $currentUserPath = [Environment]::GetEnvironmentVariable("Path", "User")
         if ($currentUserPath -notlike "*$nodeDir*") {
-            [Environment]::SetEnvironmentVariable("Path", "$currentUserPath;$nodeDir", "User")
-            Write-Host "  [OK] Added Node.js to PATH: $nodeDir" -ForegroundColor Green
+            if ($PSCmdlet.ShouldProcess("User PATH", "Add $nodeDir")) {
+                [Environment]::SetEnvironmentVariable("Path", "$currentUserPath;$nodeDir", "User")
+                Write-Host "  [OK] Added Node.js to PATH: $nodeDir" -ForegroundColor Green
+            }
         }
-        $node = Get-Command node -ErrorAction SilentlyContinue
+        $node = Get-CommandSafe node
     }
 }
 if (-not $node) {
     Write-Host "  [ERROR] Node.js not found." -ForegroundColor Red
     Write-Host ""
-    Write-Host "  ┌─ What to do: ───────────────────────────────────────────────────────────────────┐" -ForegroundColor Yellow
-    Write-Host "  │  1. Install Node.js 18+ from https://nodejs.org/ (LTS recommended)              │" -ForegroundColor Yellow
-    Write-Host "  │  2. Re-run:                                                                     │" -ForegroundColor Yellow
-    Write-Host "  │     irm https://raw.githubusercontent.com/$REPO/main/scripts/install.ps1 | iex  |" -ForegroundColor Yellow
-    Write-Host "  └─────────────────────────────────────────────────────────────────────────────────┘" -ForegroundColor Yellow
-    exit 1
+    Write-Boxed -Heading 'What to do' -Lines @(
+        '1. Install Node.js 18+ from https://nodejs.org/ (LTS recommended)'
+        '2. Re-run:'
+        "   irm https://raw.githubusercontent.com/$REPO/main/scripts/install.ps1 | iex"
+    )
+    Exit-IfReal 1
 }
-$nodeVer = (node --version 2>&1) -replace 'v', ''
-$nodeMajor = [int]($nodeVer.Split('.')[0])
-if ($nodeMajor -lt 18) {
-    Write-Host "  [ERROR] Node.js 18+ required (found $nodeVer)" -ForegroundColor Red
-    Write-Host ""
-    Write-Host "  ┌─ What to do: ───────────────────────────────────────────────────────────────────┐" -ForegroundColor Yellow
-    Write-Host "  │  1. Install Node.js 18+ from https://nodejs.org/ (LTS recommended)              │" -ForegroundColor Yellow
-    Write-Host "  │  2. Re-run:                                                                     │" -ForegroundColor Yellow
-    Write-Host "  │     irm https://raw.githubusercontent.com/$REPO/main/scripts/install.ps1 | iex  |" -ForegroundColor Yellow
-    Write-Host "  └─────────────────────────────────────────────────────────────────────────────────┘" -ForegroundColor Yellow
-    exit 1
+if ($node) {
+    $nodeVer = (node --version 2>&1) -replace 'v', ''
+    $nodeMajor = [int]($nodeVer.Split('.')[0])
+    if ($nodeMajor -lt 18) {
+        Write-Host "  [ERROR] Node.js 18+ required (found $nodeVer)" -ForegroundColor Red
+        Write-Host ""
+        Write-Boxed -Heading 'What to do' -Lines @(
+            '1. Install Node.js 18+ from https://nodejs.org/ (LTS recommended)'
+            '2. Re-run:'
+            "   irm https://raw.githubusercontent.com/$REPO/main/scripts/install.ps1 | iex"
+        )
+        Exit-IfReal 1
+    }
+    Write-Host "  [OK] Node.js $nodeVer" -ForegroundColor Green
 }
-Write-Host "  [OK] Node.js $nodeVer" -ForegroundColor Green
 
 # --- Check/Install Copilot CLI ---
-$copilot = Get-Command copilot -ErrorAction SilentlyContinue
+$copilot = Get-CommandSafe copilot
 if (-not $copilot) {
-    if (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
+    if (-not (Get-CommandSafe npm)) {
         Write-Host "  [ERROR] npm not found (should be installed with Node.js)." -ForegroundColor Red
         Write-Host ""
-        Write-Host "  ┌─ What to do: ───────────────────────────────────────────────────────────────────┐" -ForegroundColor Yellow
-        Write-Host "  │  1. Re-install Node.js 18+ from https://nodejs.org/ (LTS recommended)           │" -ForegroundColor Yellow
-        Write-Host "  │  2. Re-run:                                                                     │" -ForegroundColor Yellow
-        Write-Host "  │     irm https://raw.githubusercontent.com/$REPO/main/scripts/install.ps1 | iex  |" -ForegroundColor Yellow
-        Write-Host "  └─────────────────────────────────────────────────────────────────────────────────┘" -ForegroundColor Yellow
-        exit 1
+        Write-Boxed -Heading 'What to do' -Lines @(
+            '1. Re-install Node.js 18+ from https://nodejs.org/ (LTS recommended)'
+            '2. Re-run:'
+            "   irm https://raw.githubusercontent.com/$REPO/main/scripts/install.ps1 | iex"
+        )
+        Exit-IfReal 1
     }
     Write-Host "  Installing GitHub Copilot CLI..." -ForegroundColor Yellow
-    npm install -g @github/copilot 2>&1 | Out-Null
-    $copilot = Get-Command copilot -ErrorAction SilentlyContinue
-    if (-not $copilot) {
-        Write-Host "  [ERROR] Failed to install Copilot CLI" -ForegroundColor Red
-        exit 1
+    if ($PSCmdlet.ShouldProcess("@github/copilot", "npm install -g")) {
+        npm install -g @github/copilot 2>&1 | Out-Null
+        $copilot = Get-CommandSafe copilot
+        if (-not $copilot) {
+            Write-Host "  [ERROR] Failed to install Copilot CLI" -ForegroundColor Red
+            Exit-IfReal 1
+        }
     }
 }
-$copilotVer = ((copilot --version 2>&1) | Select-Object -First 1) -replace '.*?(\d+\.\d+\.\d+[-\d]*).*', '$1'
-Write-Host "  [OK] Copilot CLI $copilotVer" -ForegroundColor Green
+if ($copilot) {
+    $copilotVer = ((copilot --version 2>&1) | Select-Object -First 1) -replace '.*?(\d+\.\d+\.\d+[-\d]*).*', '$1'
+    Write-Host "  [OK] Copilot CLI $copilotVer" -ForegroundColor Green
+}
 
 # --- Install Copilot Console ---
 Write-Host ""
@@ -146,68 +257,76 @@ try {
     if (-not $WHL_URL) {
         Write-Host "  [ERROR] No .whl found in latest release." -ForegroundColor Red
         Write-Host "     Check https://github.com/$REPO/releases" -ForegroundColor Yellow
-        exit 1
+        Exit-IfReal 1
     }
     Write-Host "  [OK] Found $($releaseInfo.tag_name)" -ForegroundColor Green
 } catch {
     Write-Host "  [ERROR] Failed to fetch latest release from GitHub." -ForegroundColor Red
     Write-Host "     Check https://github.com/$REPO/releases for manual download." -ForegroundColor Yellow
-    exit 1
+    Exit-IfReal 1
 }
 
 Write-Host ""
-Write-Host "  ┌─────────────────────────────────────────────────────┐" -ForegroundColor Yellow
-Write-Host "  │  ⏳ This may take 5-8 minutes — please wait...      │" -ForegroundColor Yellow
-Write-Host "  └─────────────────────────────────────────────────────┘" -ForegroundColor Yellow
+Write-Boxed -Lines @('⏳ This may take 5-8 minutes — please wait...')
 Write-Host ""
 
 $installed = $false
 $usedPipx = $false
 $pipxAvailable = $false
-try { $pipxCheck = python -m pipx --version 2>&1 | Out-String; if ($LASTEXITCODE -eq 0) { $pipxAvailable = $true } } catch { }
+if ($python -and -not $AssumeDependenciesMissing) {
+    try { $pipxCheck = python -m pipx --version 2>&1 | Out-String; if ($LASTEXITCODE -eq 0) { $pipxAvailable = $true } } catch { }
+}
 if ($pipxAvailable) {
-    python -m pipx install --force $WHL_URL 2>&1 | ForEach-Object {
-        $line = $_.ToString().Trim()
-        if ($line -ne '' -and $line -notmatch 'symlink|These apps') {
-            Write-Host "  $line" -ForegroundColor DarkGray
+    if ($PSCmdlet.ShouldProcess($WHL_URL, "python -m pipx install --force")) {
+        python -m pipx install --force $WHL_URL 2>&1 | ForEach-Object {
+            $line = $_.ToString().Trim()
+            if ($line -ne '' -and $line -notmatch 'symlink|These apps') {
+                Write-Host "  $line" -ForegroundColor DarkGray
+            }
         }
-    }
-    if ($LASTEXITCODE -eq 0) {
-        $installed = $true
-        $usedPipx = $true
-    } else {
-        Write-Host "  [WARN] pipx install failed, using python -m pip instead..." -ForegroundColor Yellow
+        if ($LASTEXITCODE -eq 0) {
+            $installed = $true
+            $usedPipx = $true
+        } else {
+            Write-Host "  [WARN] pipx install failed, using python -m pip instead..." -ForegroundColor Yellow
+        }
     }
 } else {
     Write-Host "  [WARN] pipx not found, using python -m pip instead." -ForegroundColor Yellow
 }
-if (-not $installed) {
-    python -m pip install --user --no-cache-dir --force-reinstall $WHL_URL 2>&1 | ForEach-Object {
-        $line = $_.ToString()
-        if ($line -match 'Downloading.*copilot.agent.console|Installing collected') {
-            Write-Host "  $line" -ForegroundColor DarkGray
+if (-not $installed -and -not $WhatIfPreference) {
+    if ($PSCmdlet.ShouldProcess($WHL_URL, "python -m pip install --user")) {
+        python -m pip install --user --no-cache-dir --force-reinstall $WHL_URL 2>&1 | ForEach-Object {
+            $line = $_.ToString()
+            if ($line -match 'Downloading.*copilot.agent.console|Installing collected') {
+                Write-Host "  $line" -ForegroundColor DarkGray
+            }
         }
-    }
-    if ($LASTEXITCODE -eq 0) {
-        $installed = $true
-    } else {
-        Write-Host "  [ERROR] pip install failed (exit code $LASTEXITCODE)." -ForegroundColor Red
-        Write-Host "     Try running as Administrator:" -ForegroundColor Yellow
-        Write-Host "     python -m pip install $WHL_URL" -ForegroundColor Yellow
+        if ($LASTEXITCODE -eq 0) {
+            $installed = $true
+        } else {
+            Write-Host "  [ERROR] pip install failed (exit code $LASTEXITCODE)." -ForegroundColor Red
+            Write-Host "     Try running as Administrator:" -ForegroundColor Yellow
+            Write-Host "     python -m pip install $WHL_URL" -ForegroundColor Yellow
+        }
     }
 }
 if (-not $installed) {
-    exit 1
+    Exit-IfReal 1
 }
 
 # Clean up stale dist-info directories that confuse importlib.metadata
-$installedVersion = $releaseInfo.tag_name -replace '^v', ''
-$siteDir = python -c "import site; print(site.getusersitepackages())" 2>$null
-if ($installedVersion -and $siteDir -and (Test-Path $siteDir)) {
-    Get-ChildItem -Path $siteDir -Directory -Filter "copilot_console-*.dist-info" | Where-Object {
-        $_.Name -ne "copilot_console-$installedVersion.dist-info"
-    } | ForEach-Object {
-        Remove-Item -Recurse -Force $_.FullName 2>$null
+if ($python -and -not $AssumeDependenciesMissing) {
+    $installedVersion = $releaseInfo.tag_name -replace '^v', ''
+    $siteDir = python -c "import site; print(site.getusersitepackages())" 2>$null
+    if ($installedVersion -and $siteDir -and (Test-Path $siteDir)) {
+        Get-ChildItem -Path $siteDir -Directory -Filter "copilot_console-*.dist-info" | Where-Object {
+            $_.Name -ne "copilot_console-$installedVersion.dist-info"
+        } | ForEach-Object {
+            if ($PSCmdlet.ShouldProcess($_.FullName, "Remove stale dist-info directory")) {
+                Remove-Item -Recurse -Force $_.FullName 2>$null
+            }
+        }
     }
 }
 
@@ -215,8 +334,8 @@ if ($installedVersion -and $siteDir -and (Test-Path $siteDir)) {
 # Refresh PATH to pick up newly installed commands (pipx or pip)
 $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
 
-$ac = Get-Command copilot-console -ErrorAction SilentlyContinue
-if (-not $ac) {
+$ac = Get-CommandSafe copilot-console
+if (-not $ac -and $python -and -not $AssumeDependenciesMissing) {
     # pip --user installs to user Scripts dir - find and add to PATH
     $userScripts = $null
     try {
@@ -230,12 +349,14 @@ if (-not $ac) {
     if (Test-Path "$userScripts\copilot-console.exe") {
         $currentPath = [Environment]::GetEnvironmentVariable('Path', 'User')
         if ($currentPath -notlike "*$userScripts*") {
-            [Environment]::SetEnvironmentVariable('Path', "$currentPath;$userScripts", 'User')
-            Write-Host "  [OK] Added to PATH: $userScripts" -ForegroundColor Green
-            Write-Host "  [NOTE] Restart your terminal for PATH to take effect." -ForegroundColor Yellow
+            if ($PSCmdlet.ShouldProcess("User PATH", "Add $userScripts")) {
+                [Environment]::SetEnvironmentVariable('Path', "$currentPath;$userScripts", 'User')
+                Write-Host "  [OK] Added to PATH: $userScripts" -ForegroundColor Green
+                Write-Host "  [NOTE] Restart your terminal for PATH to take effect." -ForegroundColor Yellow
+            }
         }
         $env:Path = "$env:Path;$userScripts"
-        $ac = Get-Command copilot-console -ErrorAction SilentlyContinue
+        $ac = Get-CommandSafe copilot-console
     }
 }
 if ($ac) {
@@ -247,46 +368,50 @@ if ($ac) {
 }
 
 # --- Install ripgrep (for cross-session search) ---
-$rg = Get-Command rg -ErrorAction SilentlyContinue
+$rg = Get-CommandSafe rg
 if (-not $rg) {
     Write-Host ""
     Write-Host "  Installing ripgrep (for cross-session search)..." -ForegroundColor Yellow
-    
+
     # Try winget first
-    $winget = Get-Command winget -ErrorAction SilentlyContinue
+    $winget = Get-CommandSafe winget
     if ($winget) {
-        winget install BurntSushi.ripgrep.MSVC --accept-source-agreements --accept-package-agreements --disable-interactivity 2>&1 | Out-Null
-        $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
-        $rg = Get-Command rg -ErrorAction SilentlyContinue
+        if ($PSCmdlet.ShouldProcess("BurntSushi.ripgrep.MSVC", "winget install")) {
+            winget install BurntSushi.ripgrep.MSVC --accept-source-agreements --accept-package-agreements --disable-interactivity 2>&1 | Out-Null
+            $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+            $rg = Get-CommandSafe rg
+        }
     }
-    
+
     # Fallback: download binary from GitHub releases
     if (-not $rg) {
         $rgVersion = "14.1.1"
         $rgUrl = "https://github.com/BurntSushi/ripgrep/releases/download/$rgVersion/ripgrep-$rgVersion-x86_64-pc-windows-msvc.zip"
         $rgInstallDir = "$env:LOCALAPPDATA\Programs\ripgrep"
         $rgZip = "$env:TEMP\ripgrep.zip"
-        try {
-            Write-Host "  Downloading ripgrep v$rgVersion binary..." -ForegroundColor Gray
-            Invoke-WebRequest -Uri $rgUrl -OutFile $rgZip -UseBasicParsing
-            New-Item -ItemType Directory -Path $rgInstallDir -Force | Out-Null
-            Expand-Archive -Path $rgZip -DestinationPath "$env:TEMP\ripgrep-extract" -Force
-            Copy-Item "$env:TEMP\ripgrep-extract\ripgrep-$rgVersion-x86_64-pc-windows-msvc\rg.exe" "$rgInstallDir\rg.exe" -Force
-            Remove-Item $rgZip -Force -ErrorAction SilentlyContinue
-            Remove-Item "$env:TEMP\ripgrep-extract" -Recurse -Force -ErrorAction SilentlyContinue
-            
-            # Add to user PATH if not already there
-            $userPath = [System.Environment]::GetEnvironmentVariable("Path", "User")
-            if ($userPath -notlike "*$rgInstallDir*") {
-                [System.Environment]::SetEnvironmentVariable("Path", "$userPath;$rgInstallDir", "User")
+        if ($PSCmdlet.ShouldProcess($rgInstallDir, "Download and install ripgrep v$rgVersion")) {
+            try {
+                Write-Host "  Downloading ripgrep v$rgVersion binary..." -ForegroundColor Gray
+                Invoke-WebRequest -Uri $rgUrl -OutFile $rgZip -UseBasicParsing
+                New-Item -ItemType Directory -Path $rgInstallDir -Force | Out-Null
+                Expand-Archive -Path $rgZip -DestinationPath "$env:TEMP\ripgrep-extract" -Force
+                Copy-Item "$env:TEMP\ripgrep-extract\ripgrep-$rgVersion-x86_64-pc-windows-msvc\rg.exe" "$rgInstallDir\rg.exe" -Force
+                Remove-Item $rgZip -Force -ErrorAction SilentlyContinue
+                Remove-Item "$env:TEMP\ripgrep-extract" -Recurse -Force -ErrorAction SilentlyContinue
+
+                # Add to user PATH if not already there
+                $userPath = [System.Environment]::GetEnvironmentVariable("Path", "User")
+                if ($userPath -notlike "*$rgInstallDir*") {
+                    [System.Environment]::SetEnvironmentVariable("Path", "$userPath;$rgInstallDir", "User")
+                }
+                $env:Path = "$env:Path;$rgInstallDir"
+                $rg = Get-CommandSafe rg
+            } catch {
+                Write-Host "  [WARN] Binary download failed: $_" -ForegroundColor Yellow
             }
-            $env:Path = "$env:Path;$rgInstallDir"
-            $rg = Get-Command rg -ErrorAction SilentlyContinue
-        } catch {
-            Write-Host "  [WARN] Binary download failed: $_" -ForegroundColor Yellow
         }
     }
-    
+
     if (-not $rg) {
         Write-Host "  [WARN] ripgrep install failed. Cross-session content search will not work." -ForegroundColor Yellow
         Write-Host "     Install manually: winget install BurntSushi.ripgrep.MSVC" -ForegroundColor Yellow
@@ -303,7 +428,12 @@ Write-Host "  Optional: Agentic Web Browsing" -ForegroundColor Cyan
 Write-Host "  Adds autonomous web navigation via Playwright MCP server." -ForegroundColor DarkGray
 Write-Host "  Uses your system browser (Edge or Chrome)." -ForegroundColor DarkGray
 Write-Host ""
-$setupPlaywright = Read-Host "  Enable agentic web browsing? (Y/n)"
+if ($WhatIfPreference -or $AssumeDependenciesMissing) {
+    Write-Host "  [DRYRUN] Would prompt: Enable agentic web browsing? (Y/n)" -ForegroundColor DarkCyan
+    $setupPlaywright = 'Y'
+} else {
+    $setupPlaywright = Read-Host "  Enable agentic web browsing? (Y/n)"
+}
 if ($setupPlaywright -ne 'n' -and $setupPlaywright -ne 'N') {
     # Add Playwright MCP server to mcp-config.json (uses system browser, no extra install needed)
     $mcpConfigPath = "$env:USERPROFILE\.copilot-console\mcp-config.json"
@@ -320,36 +450,42 @@ if ($setupPlaywright -ne 'n' -and $setupPlaywright -ne 'N') {
     if ($addPlaywright) {
         # Ensure directory exists
         $mcpDir = Split-Path $mcpConfigPath
-        if (-not (Test-Path $mcpDir)) { New-Item -ItemType Directory -Path $mcpDir -Force | Out-Null }
-
-        if (Test-Path $mcpConfigPath) {
-            try {
-                $config = Get-Content $mcpConfigPath -Raw | ConvertFrom-Json
-                $playwrightServer = @{
-                    type = "local"
-                    command = "npx"
-                    tools = @("*")
-                    args = @("@playwright/mcp@latest")
-                }
-                $config.mcpServers | Add-Member -MemberType NoteProperty -Name "playwright" -Value $playwrightServer
-                $config | ConvertTo-Json -Depth 5 | Set-Content $mcpConfigPath -Encoding UTF8
-            } catch {
-                Write-Host "  [WARN] Failed to update mcp-config.json. Add playwright server manually." -ForegroundColor Yellow
+        if (-not (Test-Path $mcpDir)) {
+            if ($PSCmdlet.ShouldProcess($mcpDir, "Create directory")) {
+                New-Item -ItemType Directory -Path $mcpDir -Force | Out-Null
             }
-        } else {
-            $newConfig = @{
-                mcpServers = @{
-                    playwright = @{
+        }
+
+        if ($PSCmdlet.ShouldProcess($mcpConfigPath, "Add playwright MCP server")) {
+            if (Test-Path $mcpConfigPath) {
+                try {
+                    $config = Get-Content $mcpConfigPath -Raw | ConvertFrom-Json
+                    $playwrightServer = @{
                         type = "local"
                         command = "npx"
                         tools = @("*")
                         args = @("@playwright/mcp@latest")
                     }
+                    $config.mcpServers | Add-Member -MemberType NoteProperty -Name "playwright" -Value $playwrightServer
+                    $config | ConvertTo-Json -Depth 5 | Set-Content $mcpConfigPath -Encoding UTF8
+                } catch {
+                    Write-Host "  [WARN] Failed to update mcp-config.json. Add playwright server manually." -ForegroundColor Yellow
                 }
+            } else {
+                $newConfig = @{
+                    mcpServers = @{
+                        playwright = @{
+                            type = "local"
+                            command = "npx"
+                            tools = @("*")
+                            args = @("@playwright/mcp@latest")
+                        }
+                    }
+                }
+                $newConfig | ConvertTo-Json -Depth 5 | Set-Content $mcpConfigPath -Encoding UTF8
             }
-            $newConfig | ConvertTo-Json -Depth 5 | Set-Content $mcpConfigPath -Encoding UTF8
+            Write-Host "  [OK] Playwright MCP server added to config" -ForegroundColor Green
         }
-        Write-Host "  [OK] Playwright MCP server added to config" -ForegroundColor Green
     }
 } else {
     Write-Host "  Skipped. Enable later — see docs/guides/INSTALL.md" -ForegroundColor DarkGray
@@ -362,50 +498,61 @@ Write-Host "  Optional: Mobile Access & CLI Notifications" -ForegroundColor Cyan
 Write-Host "  Access sessions from your phone, get push notifications when" -ForegroundColor DarkGray
 Write-Host "  any Copilot CLI session finishes. Requires devtunnel." -ForegroundColor DarkGray
 Write-Host ""
-$setupMobile = Read-Host "  Enable mobile access & notifications? (Y/n)"
+if ($WhatIfPreference -or $AssumeDependenciesMissing) {
+    Write-Host "  [DRYRUN] Would prompt: Enable mobile access & notifications? (Y/n)" -ForegroundColor DarkCyan
+    $setupMobile = 'Y'
+} else {
+    $setupMobile = Read-Host "  Enable mobile access & notifications? (Y/n)"
+}
 if ($setupMobile -ne 'n' -and $setupMobile -ne 'N') {
     # Enable CLI notifications
-    $cliNotify = Get-Command cli-notify -ErrorAction SilentlyContinue
+    $cliNotify = Get-CommandSafe cli-notify
     if ($cliNotify) {
-        cli-notify on 2>&1 | Out-Null
-        if ($LASTEXITCODE -eq 0) {
-            Write-Host "  [OK] CLI notifications enabled" -ForegroundColor Green
-        } else {
-            Write-Host "  [WARN] Failed to enable. Run 'cli-notify on' manually." -ForegroundColor Yellow
+        if ($PSCmdlet.ShouldProcess("cli-notify", "Enable CLI notifications")) {
+            cli-notify on 2>&1 | Out-Null
+            if ($LASTEXITCODE -eq 0) {
+                Write-Host "  [OK] CLI notifications enabled" -ForegroundColor Green
+            } else {
+                Write-Host "  [WARN] Failed to enable. Run 'cli-notify on' manually." -ForegroundColor Yellow
+            }
         }
     } else {
         Write-Host "  [WARN] cli-notify not found. Restart terminal and run 'cli-notify on'." -ForegroundColor Yellow
     }
 
     # Install devtunnel
-    $devtunnel = Get-Command devtunnel -ErrorAction SilentlyContinue
+    $devtunnel = Get-CommandSafe devtunnel
     if (-not $devtunnel) {
         Write-Host "  Installing devtunnel..." -ForegroundColor Yellow
-        $winget = Get-Command winget -ErrorAction SilentlyContinue
+        $winget = Get-CommandSafe winget
         if ($winget) {
-            winget install Microsoft.devtunnel --accept-source-agreements --accept-package-agreements --disable-interactivity 2>&1 | Out-Null
-            $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
-            $devtunnel = Get-Command devtunnel -ErrorAction SilentlyContinue
+            if ($PSCmdlet.ShouldProcess("Microsoft.devtunnel", "winget install")) {
+                winget install Microsoft.devtunnel --accept-source-agreements --accept-package-agreements --disable-interactivity 2>&1 | Out-Null
+                $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+                $devtunnel = Get-CommandSafe devtunnel
+            }
         }
         if (-not $devtunnel) {
             # Download standalone binary (no npm/admin needed)
             $dtDir = "$env:LOCALAPPDATA\Programs\devtunnel"
             $dtExe = "$dtDir\devtunnel.exe"
-            try {
-                if (-not (Test-Path $dtDir)) { New-Item -ItemType Directory -Path $dtDir -Force | Out-Null }
-                Write-Host "  Downloading devtunnel binary..." -ForegroundColor Yellow
-                Invoke-WebRequest -Uri "https://aka.ms/TunnelsCliDownload/win-x64" -OutFile $dtExe -UseBasicParsing
-                if (Test-Path $dtExe) {
-                    # Add to user PATH if not already there
-                    $userPath = [System.Environment]::GetEnvironmentVariable("Path", "User")
-                    if ($userPath -notlike "*$dtDir*") {
-                        [System.Environment]::SetEnvironmentVariable("Path", "$userPath;$dtDir", "User")
+            if ($PSCmdlet.ShouldProcess($dtExe, "Download devtunnel binary")) {
+                try {
+                    if (-not (Test-Path $dtDir)) { New-Item -ItemType Directory -Path $dtDir -Force | Out-Null }
+                    Write-Host "  Downloading devtunnel binary..." -ForegroundColor Yellow
+                    Invoke-WebRequest -Uri "https://aka.ms/TunnelsCliDownload/win-x64" -OutFile $dtExe -UseBasicParsing
+                    if (Test-Path $dtExe) {
+                        # Add to user PATH if not already there
+                        $userPath = [System.Environment]::GetEnvironmentVariable("Path", "User")
+                        if ($userPath -notlike "*$dtDir*") {
+                            [System.Environment]::SetEnvironmentVariable("Path", "$userPath;$dtDir", "User")
+                        }
+                        $env:Path = "$env:Path;$dtDir"
+                        $devtunnel = Get-CommandSafe devtunnel
                     }
-                    $env:Path = "$env:Path;$dtDir"
-                    $devtunnel = Get-Command devtunnel -ErrorAction SilentlyContinue
+                } catch {
+                    # download failed — fall through to error message
                 }
-            } catch {
-                # download failed — fall through to error message
             }
         }
         if (-not $devtunnel) {
@@ -419,13 +566,15 @@ if ($setupMobile -ne 'n' -and $setupMobile -ne 'N') {
         Write-Host "  Signing in to devtunnel..." -ForegroundColor Yellow
         Write-Host "  TIP: Use a work or school (Entra ID) account for best iOS/Safari support." -ForegroundColor Yellow
         Write-Host "  If you only have a personal account, use --allow-anonymous mode instead." -ForegroundColor DarkGray
-        devtunnel user login
-        $loginStatus = devtunnel user show 2>&1
-        if ($loginStatus -notmatch "Not logged in") {
-            Write-Host "  [OK] devtunnel authenticated" -ForegroundColor Green
-            $mobileEnabled = $true
-        } else {
-            Write-Host "  [WARN] devtunnel login was not completed. Run 'devtunnel user login' later." -ForegroundColor Yellow
+        if ($PSCmdlet.ShouldProcess("devtunnel", "User login")) {
+            devtunnel user login
+            $loginStatus = devtunnel user show 2>&1
+            if ($loginStatus -notmatch "Not logged in") {
+                Write-Host "  [OK] devtunnel authenticated" -ForegroundColor Green
+                $mobileEnabled = $true
+            } else {
+                Write-Host "  [WARN] devtunnel login was not completed. Run 'devtunnel user login' later." -ForegroundColor Yellow
+            }
         }
     }
 } else {
