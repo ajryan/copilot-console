@@ -210,7 +210,7 @@ _dep_install_cmd() {
                 curl)    echo "brew install curl" ;;
                 python3) echo "brew install python" ;;
                 nodejs)  echo "brew install node" ;;
-                pip)     echo "" ;;
+                pipx)    echo "brew install pipx" ;;
                 ripgrep) echo "brew install ripgrep" ;;
             esac
         fi
@@ -228,7 +228,7 @@ _dep_install_cmd() {
         curl)    pkg="curl" ;;
         python3) pkg="python3" ;;
         nodejs)  pkg="nodejs npm" ;;
-        pip)     pkg="python3-pip" ;;
+        pipx)    pkg="pipx" ;;
         ripgrep) pkg="ripgrep" ;;
     esac
     case "$mgr" in
@@ -264,10 +264,15 @@ _dep_manual_lines() {
                 echo "sudo apt install nodejs npm    # Debian/Ubuntu"
                 echo "sudo dnf install nodejs npm    # Fedora/RHEL"
             fi ;;
-        pip)
-            echo "sudo apt install python3-pip   # Debian/Ubuntu"
-            echo "sudo dnf install python3-pip   # Fedora/RHEL"
-            echo "(macOS: pip ships with brew python)" ;;
+        pipx)
+            if [[ "$OSTYPE" == "darwin"* ]]; then
+                echo "brew install pipx          # requires Homebrew (https://brew.sh)"
+                echo "pipx ensurepath"
+            else
+                echo "sudo apt install pipx          # Debian/Ubuntu (Ubuntu 23.04+)"
+                echo "sudo dnf install pipx          # Fedora/RHEL"
+                echo "pipx ensurepath"
+            fi ;;
         ripgrep)
             if [[ "$OSTYPE" == "darwin"* ]]; then
                 echo "brew install ripgrep"
@@ -285,9 +290,7 @@ declare -a MISSING_DEPS=()
 have curl    || MISSING_DEPS+=(curl)
 have python3 || MISSING_DEPS+=(python3)
 have node    || MISSING_DEPS+=(nodejs)
-if ! have python3 || ! python3 -m pip --version &> /dev/null; then
-    MISSING_DEPS+=(pip)
-fi
+have pipx    || MISSING_DEPS+=(pipx)
 have rg      || MISSING_DEPS+=(ripgrep)
 have copilot || MISSING_DEPS+=(copilot)
 
@@ -539,60 +542,33 @@ echo ""
 boxed -c "$YELLOW" "⏳ This may take 5-8 minutes — please wait..."
 echo ""
 
-# --- pip safety net (preflight should have handled this) ---
-if ! python3 -m pip --version &> /dev/null; then
-    echo -e "${RED}  [ERROR] pip not available.${NC}"
+# --- pipx safety net (preflight should have handled this) ---
+if ! have pipx; then
+    echo -e "${RED}  [ERROR] pipx not available.${NC}"
     boxed -h "What to do" \
-        "1. Install pip manually:" \
-        "     sudo apt install python3-pip   # Debian/Ubuntu" \
-        "     sudo dnf install python3-pip   # Fedora/RHEL" \
+        "1. Install pipx manually:" \
+        "     sudo apt install pipx          # Debian/Ubuntu" \
+        "     sudo dnf install pipx          # Fedora/RHEL" \
+        "     brew install pipx              # macOS" \
+        "   then run: pipx ensurepath" \
         "2. Re-run:" \
         "   curl -fsSL https://raw.githubusercontent.com/$REPO/main/scripts/install.sh | bash"
     die
 fi
 
-PIP_USER_FLAG="--user"
-PIP_BREAK_FLAG=""
-# On systems with externally-managed Python, use --break-system-packages
-if python3 -m pip install --help 2>&1 | grep -q 'break-system-packages'; then
-    PIP_BREAK_FLAG="--break-system-packages"
-fi
-
 INSTALLED=false
-USED_PIPX=false
-if have pipx; then
-    if [ "$DRY_RUN" = 1 ]; then
-        run "pipx install --force $WHL_URL" pipx install --force "$WHL_URL"
-        INSTALLED=true
-        USED_PIPX=true
-    else
-        PIPX_OUTPUT=$(pipx install --force "$WHL_URL" 2>&1)
-        PIPX_EXIT=$?
-        if [ $PIPX_EXIT -eq 0 ]; then
-            echo "$PIPX_OUTPUT" | grep -vE 'symlink|These apps' | grep -v '^$' | sed 's/^/  /' | sed "s/.*/  ${GRAY}&${NC}/"
-            INSTALLED=true
-            USED_PIPX=true
-        else
-            echo -e "${YELLOW}  [WARN] pipx install failed, using pip instead...${NC}"
-        fi
-    fi
+if [ "$DRY_RUN" = 1 ]; then
+    run "pipx install --force $WHL_URL" pipx install --force "$WHL_URL"
+    INSTALLED=true
 else
-    echo -e "${YELLOW}  [WARN] pipx not found, using pip instead.${NC}"
-fi
-if [ "$INSTALLED" = false ]; then
-    if [ "$DRY_RUN" = 1 ]; then
-        run "python3 -m pip install $WHL_URL" \
-            python3 -m pip install $PIP_USER_FLAG $PIP_BREAK_FLAG --no-cache-dir --force-reinstall "$WHL_URL"
+    PIPX_OUTPUT=$(pipx install --force "$WHL_URL" 2>&1)
+    PIPX_EXIT=$?
+    if [ $PIPX_EXIT -eq 0 ]; then
+        echo "$PIPX_OUTPUT" | grep -vE 'symlink|These apps' | grep -v '^$' | sed 's/^/  /' | sed "s/.*/  ${GRAY}&${NC}/"
         INSTALLED=true
     else
-    PIP_OUTPUT=$(python3 -m pip install $PIP_USER_FLAG $PIP_BREAK_FLAG --no-cache-dir --force-reinstall "$WHL_URL" 2>&1)
-    PIP_EXIT=$?
-    if [ $PIP_EXIT -eq 0 ]; then
-        echo "$PIP_OUTPUT" | grep -E 'Downloading.*copilot|Installing collected' | sed 's/^/  /' | sed "s/.*/  ${GRAY}&${NC}/"
-        INSTALLED=true
-    else
-        echo -e "${RED}  [ERROR] pip install failed.${NC}"
-    fi
+        echo -e "${RED}  [ERROR] pipx install failed.${NC}"
+        echo "$PIPX_OUTPUT" | sed 's/^/    /'
     fi
 fi
 # Clean up stale dist-info directories that confuse importlib.metadata
@@ -611,14 +587,14 @@ fi
 if [ "$INSTALLED" = false ]; then
     boxed -h "What to do" \
         "1. Try installing manually:" \
-        "     python3 -m pip install \"$WHL_URL\"" \
+        "     pipx install --force \"$WHL_URL\"" \
         "2. Re-run:" \
         "   curl -fsSL https://raw.githubusercontent.com/$REPO/main/scripts/install.sh | bash"
     die
 fi
 
 # --- Verify ---
-# Ensure pip --user bin dir is in PATH
+# Ensure pipx-managed shims dir (~/.local/bin) is in PATH
 PATH_MODIFIED=false
 SHELL_RC=""
 if [ -f "$HOME/.zshrc" ]; then

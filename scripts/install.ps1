@@ -127,6 +127,7 @@ function Get-DepInstallCmd {
         'python'  { if ($HasWinget) { 'winget install -e --id Python.Python.3.11 --accept-source-agreements --accept-package-agreements --disable-interactivity' } else { '' } }
         'nodejs'  { if ($HasWinget) { 'winget install -e --id OpenJS.NodeJS.LTS --accept-source-agreements --accept-package-agreements --disable-interactivity' } else { '' } }
         'ripgrep' { if ($HasWinget) { 'winget install -e --id BurntSushi.ripgrep.MSVC --accept-source-agreements --accept-package-agreements --disable-interactivity' } else { '' } }
+        'pipx'    { 'python -m pip install --user pipx; python -m pipx ensurepath' }
         'copilot' { 'npm install -g @github/copilot' }
         default   { '' }
     }
@@ -152,6 +153,12 @@ function Get-DepManualLines {
             '  winget install -e --id BurntSushi.ripgrep.MSVC',
             'Or download a release from:',
             '  https://github.com/BurntSushi/ripgrep/releases'
+        ) }
+        'pipx'    { @(
+            'Install pipx (requires Python and pip):',
+            '  python -m pip install --user pipx',
+            '  python -m pipx ensurepath',
+            'Then restart your terminal.'
         ) }
         'copilot' { @(
             'Install GitHub Copilot CLI (requires Node.js / npm):',
@@ -195,6 +202,17 @@ if (Get-CommandSafe python) {
 }
 if (-not (Get-CommandSafe node))    { $missingDeps += 'nodejs' }
 if (-not (Get-CommandSafe rg))      { $missingDeps += 'ripgrep' }
+# pipx detection: prefer the standalone command, fall back to `python -m pipx`
+# since the Windows pipx installer doesn't always create a top-level shim.
+$pipxOk = $false
+if (-not $AssumeDependenciesMissing) {
+    if (Get-Command pipx -ErrorAction SilentlyContinue) {
+        $pipxOk = $true
+    } elseif ($pythonOk) {
+        try { python -m pipx --version 2>&1 | Out-Null; if ($LASTEXITCODE -eq 0) { $pipxOk = $true } } catch { }
+    }
+}
+if (-not $pipxOk) { $missingDeps += 'pipx' }
 if (-not (Get-CommandSafe copilot)) { $missingDeps += 'copilot' }
 
 if ($missingDeps.Count -gt 0) {
@@ -410,45 +428,35 @@ Write-Host ""
 Write-Boxed -Lines @('⏳ This may take 5-8 minutes — please wait...')
 Write-Host ""
 
-$installed = $false
-$usedPipx = $false
-$pipxAvailable = $false
-if ($python -and -not $AssumeDependenciesMissing) {
-    try { $pipxCheck = python -m pipx --version 2>&1 | Out-String; if ($LASTEXITCODE -eq 0) { $pipxAvailable = $true } } catch { }
+# --- Install Copilot Console via pipx ---
+# pipx is required by preflight, so we don't fall back to plain pip. If the
+# pipx shim isn't on PATH yet (common right after install), invoke through
+# `python -m pipx`.
+$pipxCmd = $null
+if (Get-Command pipx -ErrorAction SilentlyContinue) {
+    $pipxCmd = 'pipx'
+} elseif ($python -and -not $AssumeDependenciesMissing) {
+    try { python -m pipx --version 2>&1 | Out-Null; if ($LASTEXITCODE -eq 0) { $pipxCmd = 'python -m pipx' } } catch { }
 }
-if ($pipxAvailable) {
-    if ($PSCmdlet.ShouldProcess($WHL_URL, "python -m pipx install --force")) {
-        python -m pipx install --force $WHL_URL 2>&1 | ForEach-Object {
-            $line = $_.ToString().Trim()
-            if ($line -ne '' -and $line -notmatch 'symlink|These apps') {
-                Write-Host "  $line" -ForegroundColor DarkGray
-            }
-        }
-        if ($LASTEXITCODE -eq 0) {
-            $installed = $true
-            $usedPipx = $true
-        } else {
-            Write-Host "  [WARN] pipx install failed, using python -m pip instead..." -ForegroundColor Yellow
+if (-not $pipxCmd -and -not ($WhatIfPreference -or $AssumeDependenciesMissing)) {
+    Write-Host "  [ERROR] pipx not available." -ForegroundColor Red
+    Write-Boxed -Heading 'What to do' -Lines (Get-DepManualLines 'pipx')
+    Exit-IfReal 1
+}
+
+$installed = $false
+if ($pipxCmd -and $PSCmdlet.ShouldProcess($WHL_URL, "$pipxCmd install --force")) {
+    Invoke-Expression "$pipxCmd install --force $WHL_URL" 2>&1 | ForEach-Object {
+        $line = $_.ToString().Trim()
+        if ($line -ne '' -and $line -notmatch 'symlink|These apps') {
+            Write-Host "  $line" -ForegroundColor DarkGray
         }
     }
-} else {
-    Write-Host "  [WARN] pipx not found, using python -m pip instead." -ForegroundColor Yellow
-}
-if (-not $installed -and -not $WhatIfPreference) {
-    if ($PSCmdlet.ShouldProcess($WHL_URL, "python -m pip install --user")) {
-        python -m pip install --user --no-cache-dir --force-reinstall $WHL_URL 2>&1 | ForEach-Object {
-            $line = $_.ToString()
-            if ($line -match 'Downloading.*copilot.agent.console|Installing collected') {
-                Write-Host "  $line" -ForegroundColor DarkGray
-            }
-        }
-        if ($LASTEXITCODE -eq 0) {
-            $installed = $true
-        } else {
-            Write-Host "  [ERROR] pip install failed (exit code $LASTEXITCODE)." -ForegroundColor Red
-            Write-Host "     Try running as Administrator:" -ForegroundColor Yellow
-            Write-Host "     python -m pip install $WHL_URL" -ForegroundColor Yellow
-        }
+    if ($LASTEXITCODE -eq 0) {
+        $installed = $true
+    } else {
+        Write-Host "  [ERROR] pipx install failed (exit code $LASTEXITCODE)." -ForegroundColor Red
+        Write-Host "     Try manually: $pipxCmd install --force $WHL_URL" -ForegroundColor Yellow
     }
 }
 if (-not $installed) {
@@ -471,31 +479,25 @@ if ($python -and -not $AssumeDependenciesMissing) {
 }
 
 # --- Verify ---
-# Refresh PATH to pick up newly installed commands (pipx or pip)
+# Refresh PATH to pick up newly installed commands (pipx-installed shims)
 $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
 
 $ac = Get-CommandSafe copilot-console
-if (-not $ac -and $python -and -not $AssumeDependenciesMissing) {
-    # pip --user installs to user Scripts dir - find and add to PATH
-    $userScripts = $null
-    try {
-        $userScripts = (python -c "import sysconfig; print(sysconfig.get_path('scripts', 'nt_user'))" 2>&1).Trim()
-    } catch { }
-    # Fallback: check common location
-    if (-not $userScripts -or -not (Test-Path $userScripts)) {
-        $pyVer = (python -c "import sys; print(f'Python{sys.version_info.major}{sys.version_info.minor}')" 2>&1).Trim()
-        $userScripts = "$env:APPDATA\Python\$pyVer\Scripts"
-    }
-    if (Test-Path "$userScripts\copilot-console.exe") {
+if (-not $ac -and -not $AssumeDependenciesMissing) {
+    # pipx installs shims to ~\.local\bin on Windows. `pipx ensurepath` should
+    # add this to the user PATH, but it requires a new shell to take effect —
+    # add it in-process now so verification + the welcome banner work.
+    $pipxBin = Join-Path $env:USERPROFILE '.local\bin'
+    if (Test-Path "$pipxBin\copilot-console.exe") {
         $currentPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-        if ($currentPath -notlike "*$userScripts*") {
-            if ($PSCmdlet.ShouldProcess("User PATH", "Add $userScripts")) {
-                [Environment]::SetEnvironmentVariable('Path', "$currentPath;$userScripts", 'User')
-                Write-Host "  [OK] Added to PATH: $userScripts" -ForegroundColor Green
+        if ($currentPath -notlike "*$pipxBin*") {
+            if ($PSCmdlet.ShouldProcess("User PATH", "Add $pipxBin")) {
+                [Environment]::SetEnvironmentVariable('Path', "$currentPath;$pipxBin", 'User')
+                Write-Host "  [OK] Added to PATH: $pipxBin" -ForegroundColor Green
                 Write-Host "  [NOTE] Restart your terminal for PATH to take effect." -ForegroundColor Yellow
             }
         }
-        $env:Path = "$env:Path;$userScripts"
+        $env:Path = "$env:Path;$pipxBin"
         $ac = Get-CommandSafe copilot-console
     }
 }
